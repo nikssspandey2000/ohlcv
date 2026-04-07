@@ -1,0 +1,9 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.env
+
+# Keep data folder tracked by git (it's our database)
+# But ignore nothing inside data/ — we want all CSVs committed
