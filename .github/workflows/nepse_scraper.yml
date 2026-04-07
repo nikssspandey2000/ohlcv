@@ -1,0 +1,106 @@
+name: NEPSE Daily Scraper
+
+on:
+  # ── Scheduled: every day at 5:00 PM Nepal Time (UTC+5:45) ──
+  # 5:00 PM NPT = 11:15 AM UTC
+  schedule:
+    - cron: "15 11 * * 1-5"   # Mon–Fri only (NEPSE weekdays)
+
+  # ── Manual trigger with optional date range ─────────────────
+  workflow_dispatch:
+    inputs:
+      from_date:
+        description: "FROM date (YYYY-MM-DD) — leave blank for today"
+        required: false
+        default: ""
+      to_date:
+        description: "TO date (YYYY-MM-DD) — leave blank for today"
+        required: false
+        default: ""
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360   # allow up to 6 hours for large historical runs
+
+    steps:
+      # ── 1. Checkout repo (includes previously committed data/) ──
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history so git push works cleanly
+
+      # ── 2. Set up Python ────────────────────────────────────────
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # ── 3. Install dependencies ─────────────────────────────────
+      - name: Install Python dependencies
+        run: |
+          pip install --upgrade pip
+          pip install selenium pandas tqdm
+
+      # ── 4. Install Chrome (latest stable) ──────────────────────
+      - name: Install Google Chrome
+        run: |
+          wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
+          sudo sh -c 'echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list'
+          sudo apt-get update -q
+          sudo apt-get install -y google-chrome-stable
+
+      # ── 5. Resolve dates (Nepal Time aware) ────────────────────
+      - name: Resolve FROM_DATE and TO_DATE
+        id: dates
+        run: |
+          python - <<'EOF'
+          from datetime import datetime, timedelta, timezone
+          import os
+
+          nepal_offset = timedelta(hours=5, minutes=45)
+          today_npt = (datetime.now(timezone.utc) + nepal_offset).strftime("%Y-%m-%d")
+
+          from_input = "${{ github.event.inputs.from_date }}".strip()
+          to_input   = "${{ github.event.inputs.to_date }}".strip()
+
+          from_date = from_input if from_input else today_npt
+          to_date   = to_input   if to_input   else today_npt
+
+          print(f"FROM_DATE={from_date}")
+          print(f"TO_DATE={to_date}")
+          print(f"Nepal Time today: {today_npt}")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"from_date={from_date}\n")
+              f.write(f"to_date={to_date}\n")
+          EOF
+
+      # ── 6. Run the scraper ──────────────────────────────────────
+      - name: Run NEPSE scraper
+        env:
+          CI: "true"
+          FROM_DATE: ${{ steps.dates.outputs.from_date }}
+          TO_DATE:   ${{ steps.dates.outputs.to_date }}
+        run: |
+          python nepse_scraper.py \
+            --from "$FROM_DATE" \
+            --to   "$TO_DATE"   \
+            --headless
+
+      # ── 7. Commit & push new data back to the repo ─────────────
+      - name: Commit and push data
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add data/ nepse_all_data.csv 2>/dev/null || true
+          
+          # Only commit if there are actual changes
+          if git diff --cached --quiet; then
+            echo "ℹ️  No new data to commit (holiday or already up-to-date)."
+          else
+            DATE_LABEL=$(TZ="Asia/Kathmandu" date "+%Y-%m-%d")
+            git commit -m "📈 NEPSE data update — $DATE_LABEL (NPT)"
+            git push
+          fi
